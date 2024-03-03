@@ -43,8 +43,8 @@ class QRZEnrichment(Enrichment):
 
         class ConfigForm(Form):
             input = TextAreaField(
-                "Geocode input",
-                description="A template to run against each row to generate geocoder input. Use {{ COL }} for columns.",
+                "Callsign input",
+                description="A template to run against each row to generate callsign addresses. Use {{ COL }} for callsign column.",
                 validators=[DataRequired(message="Prompt is required.")],
                 default=" ".join(["{{ %s }}" % c for c in text_columns]),
             )
@@ -58,29 +58,43 @@ class QRZEnrichment(Enrichment):
 
         def stash_api_key(form, field):
             if not hasattr(datasette, "_enrichments_gmap_geocode_stashed_keys"):
-                datasette._enrichments_gmap_geocode_stashed_keys = {}
+                datasette._enrichments_qrz_stashed_keys = {}
             key = secrets.token_urlsafe(16)
-            datasette._enrichments_gmap_geocode_stashed_keys[key] = field.data
+            datasette._enrichments_qrz_stashed_keys[key] = field.data
             field.data = key
 
         class ConfigFormWithKey(ConfigForm):
             api_key = PasswordField(
                 "API key",
-                description="Your Google Maps API key",
+                description="Your QRZ API key",
                 validators=[
                     DataRequired(message="API key is required."),
                     stash_api_key,
                 ],
             )
 
-        plugin_config = datasette.plugin_config("datasette-enrichments-gmap-geocode") or {}
+        plugin_config = datasette.plugin_config("datasette-enrichments-qrz") or {}
         api_key = plugin_config.get("api_key")
 
         return ConfigForm if api_key else ConfigFormWithKey
 
+    qrz_sess = "none"
     async def enrich_batch(self, rows, datasette, db, table, pks, config):
-        #  https://maps.googleapis.com/maps/api/geocode/json?address=URI-ENCODED-PLACENAME&key=b591350c2f9c48a7b7176660bbfd802a
-        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        global qrz_sess
+        if(qrz_sess == "none"):
+            #  https://maps.googleapis.com/maps/api/geocode/json?address=URI-ENCODED-PLACENAME&key=b591350c2f9c48a7b7176660bbfd802a
+            #url = "https://maps.googleapis.com/maps/api/geocode/json"
+            #QRZ takes a bit more effort to access
+            qrz_pswd = os.getenv("QRZ_PSWD")
+            qrz_pswd = qrz_pswd.replace('"','')
+            request_string = 'https://xmldata.qrz.com/xml/?username='+username+';password='+qrz_pswd
+            sess = requests.get('https://xmldata.qrz.com/xml/?username='+username+';password='+qrz_pswd)
+            root = ET.fromstring(sess.text)
+            sess_id = root.find('{http://xmldata.qrz.com}Session/{http://xmldata.qrz.com}Key')
+            auto_geo_vars.qrz_sess = sess_id
+        else:
+            sess_id = auto_geo_vars.qrz_sess
+        
         params = {
             "key": resolve_api_key(datasette, config),
             "limit": 1,
@@ -94,6 +108,15 @@ class QRZEnrichment(Enrichment):
             input = input.replace("{{ %s }}" % key, str(value or "")).replace(
                 "{{%s}}" % key, str(value or "")
             )
+#    r = requests.get('https://xmldata.qrz.com/xml/current/?s='+sess_id.text+';callsign='+callsign)
+#    root = ET.fromstring(r.text)
+    #print(r.text)
+#    #now, get addr1, addr2, and state
+#    addr1 = root.find('{http://xmldata.qrz.com}Callsign/{http://xmldata.qrz.com}addr1')
+#    addr2 = root.find('{http://xmldata.qrz.com}Callsign/{http://xmldata.qrz.com}addr2')
+#    state = root.find('{http://xmldata.qrz.com}Callsign/{http://xmldata.qrz.com}state')
+#    country = root.find('{http://xmldata.qrz.com}Callsign/{http://xmldata.qrz.com}country')
+
         params["address"] = input
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params)
